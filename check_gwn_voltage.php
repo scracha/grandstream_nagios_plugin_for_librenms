@@ -7,7 +7,7 @@ define('STATE_WARNING', 1);
 define('STATE_CRITICAL', 2);
 define('STATE_UNKNOWN', 3);
 
-// --- 1. NAGIOS EXIT HANDLER ---
+// --- 1. NAGIOS EXIT HANDLER (Modified for Standard Output) ---
 
 function check_exit($state, $message, $perfdata = "") {
     $status_text = 'UNKNOWN';
@@ -27,7 +27,8 @@ function check_exit($state, $message, $perfdata = "") {
             break;
     }
     
-    echo "GWN_VOLTAGE {$status_text}: {$message}{$perfdata}\n";
+    // Standard Nagios output format: STATUS - MESSAGE | PERFDATA
+    echo "{$status_text} - {$message}{$perfdata}\n"; 
     exit($state);
 }
 
@@ -36,7 +37,7 @@ function check_exit($state, $message, $perfdata = "") {
 $options = getopt("H:U:P:w:c:h");
 
 if (isset($options['h']) || !isset($options['H']) || !isset($options['U']) || !isset($options['P']) || !isset($options['w']) || !isset($options['c'])) {
-    check_exit(STATE_UNKNOWN, "Usage: check_gwn_voltage -H <ip> -U <user> -P <pass> -w <warn_volts> -c <crit_volts>\nExample: check_gwn_voltage -H 172.16.173.101 -U admin -P MyPassw0rD -w 40 -c 35");
+    check_exit(STATE_UNKNOWN, "Usage: check_gwn_voltage -H <ip> -U <user> -P <pass> -w <warn_volts> -c <crit_volts>\nExample: check_gwn_voltage -H 172.16.171.101 -U admin -P Wiz26c@n -w 40 -c 35");
 }
 
 $device_ip = $options['H'];
@@ -68,21 +69,15 @@ function calculate_final_hash($user, $nonce, $plain_pass) {
 
 /**
  * Executes both the get_nonce and login steps using a single cURL handle
- * to ensure session cookie is reliably passed.
- * Returns the authentication token on success, or null on failure.
  */
 function login_grandstream($nonce_url, $login_url, $ip, $user, $plain_pass) {
     $ch = curl_init();
     
-    // Set global connection options for a fresh session
+    // Setup for fresh, memory-based session
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_HEADER, false);
-    
-    // CRITICAL: Force a fresh TCP connection on every run to prevent reuse issues
     curl_setopt($ch, CURLOPT_FORBID_REUSE, true); 
     curl_setopt($ch, CURLOPT_FRESH_CONNECT, true);
-    
-    // Use "" for CURLOPT_COOKIEJAR/FILE to store cookie in memory
     curl_setopt($ch, CURLOPT_COOKIEJAR, "");
     curl_setopt($ch, CURLOPT_COOKIEFILE, ""); 
     
@@ -117,12 +112,8 @@ function login_grandstream($nonce_url, $login_url, $ip, $user, $plain_pass) {
     // --- Step 2: LOGIN ---
     $final_password = calculate_final_hash($user, $nonce, $plain_pass);
     
-    $post_data = json_encode([
-        'username' => $user, 
-        'password' => $final_password
-    ]);
+    $post_data = json_encode(['username' => $user, 'password' => $final_password]);
 
-    // Reset cURL options for POST request, keeping the cookie state in the handle
     curl_setopt($ch, CURLOPT_URL, $login_url);
     curl_setopt($ch, CURLOPT_POST, 1);
     curl_setopt($ch, CURLOPT_POSTFIELDS, $post_data); 
@@ -185,20 +176,40 @@ function check_voltage($url, $auth_token) {
          $voltage_v = round($raw_voltage_mv / 1000, 3);
          
          $state = STATE_OK;
-         $message = "Input Supply Voltage is {$voltage_v} V (Warn < {$GLOBALS['warn_threshold']}V, Crit < {$GLOBALS['crit_threshold']}V).";
+         
+         // Base message format
+         $message = sprintf(
+             "%s: Input_Voltage %.3fV, (Warn < %.1fV, Crit < %.1fV).",
+             $GLOBALS['device_ip'],
+             $voltage_v,
+             $GLOBALS['warn_threshold'],
+             $GLOBALS['crit_threshold']
+         );
 
+         // Handle WARNING/CRITICAL logic
          if ($voltage_v <= $GLOBALS['crit_threshold']) {
              $state = STATE_CRITICAL;
-             $message = "Input Supply Voltage CRITICAL: {$voltage_v} V (Threshold: < {$GLOBALS['crit_threshold']}V).";
+             $message = sprintf(
+                 "%s: Input_Voltage %.3fV (Threshold: < %.1fV).",
+                 $GLOBALS['device_ip'],
+                 $voltage_v,
+                 $GLOBALS['crit_threshold']
+             );
          } elseif ($voltage_v <= $GLOBALS['warn_threshold']) {
              $state = STATE_WARNING;
-             $message = "Input Supply Voltage WARNING: {$voltage_v} V (Threshold: < {$GLOBALS['warn_threshold']}V).";
+             $message = sprintf(
+                 "%s: Input_Voltage %.3fV (Threshold: < %.1fV).",
+                 $GLOBALS['device_ip'],
+                 $voltage_v,
+                 $GLOBALS['warn_threshold']
+             );
          }
          
-         // FINAL FIX: Change perfdata format to include the 'V' unit (Volts)
-         // and use 'Voltage' for the label, aligning with the standard pattern.
+         // LIBRENMS COMPLIANCE FIX: 
+         // 1. Label changed to 'Input_Voltage'.
+         // 2. Unit 'V' REMOVED from the value string to allow LibreNMS to assign it to UOM.
          $perfdata = sprintf(
-            "| 'Voltage'=%sV;%s;%s;0;60", // Added 'V' to the value and changed label to 'Voltage'
+            "| 'Input_Voltage'=%.3f;%.1f;%.1f;0;60", 
             $voltage_v,
             $GLOBALS['warn_threshold'],
             $GLOBALS['crit_threshold']
@@ -227,7 +238,6 @@ function logout_grandstream($url, $ip, $auth_token) {
         'Host: ' . $ip,
         'Accept: application/json, text/plain, */*',
         'Authorization: ' . $auth_token,
-        'Content-Length: ' . strlen($post_data),
         'Content-Type: application/json',
         'Origin: http://' . $ip,
         'Referer: http://' . $ip . '/',
@@ -251,22 +261,21 @@ $GLOBALS['warn_threshold'] = $warn_threshold;
 $GLOBALS['crit_threshold'] = $crit_threshold;
 $GLOBALS['device_ip'] = $device_ip; 
 
-// 1. ATTEMPT LOGIN (Nonce retrieval and Login combined)
+// 1. ATTEMPT LOGIN 
 $auth_token = login_grandstream($nonce_url, $login_url, $device_ip, $username, $password);
 
 if (!$auth_token) {
+    // Standard error message if login fails
     check_exit(STATE_CRITICAL, "Login failed. Check IP/connectivity or authentication credentials.");
 }
 
 // 2. RETRIEVE AND CHECK VOLTAGE
 $check_result = check_voltage($voltage_page_url, $auth_token);
 
-// 3. LOGOUT 
-// Ensure session is closed regardless of check result
+// 3. LOGOUT (Critical for freeing the session)
 logout_grandstream($logout_url, $device_ip, $auth_token);
 
 // 4. FINAL EXIT
-
 check_exit($check_result['state'], $check_result['message'], $check_result['perfdata']);
 
 ?>
