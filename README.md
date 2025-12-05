@@ -5,5 +5,8 @@ Install Nagios Plugins as per LibreNMS documentation - currently at https://docs
 You'll also need to install php on your LibreNMS server.
 
 You can use service templates but this will limit you to having the same username and password for each device as well as voltage warning and critical levels.
+![Alt text](/libreNMS_service_template.jpg?raw=true "libreNMS_service_template.jpg")
+
+
 
 The GWN7710r does not accept simultaneous logins nor frequent logins (I have not fully tested but less than around 30s between logins fails).
